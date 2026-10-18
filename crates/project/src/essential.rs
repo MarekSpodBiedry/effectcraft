@@ -12,11 +12,11 @@
 //!   [`sync_project`] keeps the groups in step with the controls (and refreshes the values of
 //!   controls that are not overridden), [`with_overrides`] builds the project an instance renders.
 
+use effectcraft_time::Tick;
 use serde::{Deserialize, Serialize};
 
 use crate::props::{GroupKind, Node, ParamUi, PropGroup, Property, Uid};
 use crate::{ItemId, ItemKind, Keyframe, Layer, LayerId, LayerSource, Project, Value};
-use effectcraft_time::Tick;
 
 /// Match id of the Essential Properties group on precomp layers.
 pub const GROUP: &str = "essential";

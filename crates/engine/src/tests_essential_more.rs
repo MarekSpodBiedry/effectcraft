@@ -243,7 +243,7 @@ fn instance_keys_follow_a_stretched_nested_layer() {
 
 #[test]
 fn one_control_with_targets_of_different_timing_stays_in_step() {
-    let (s, scene, inner, [a, b], inst) = keyed_instance([(0.5, 100.0), (0.0, 200.0)]);
+    let (s, scene, inner, [a, b], inst) = keyed_instance([(0.5, 100.0), (0.25, 200.0)]);
     for t in [0.2, 0.6, 0.75, 0.9] {
         let (va, pa) = rendered(&s, scene, inner, inst, a, t);
         let (vb, pb) = rendered(&s, scene, inner, inst, b, t);
