@@ -1594,6 +1594,11 @@ impl EffectcraftApp {
                 }
                 effectcraft_engine::Event::Toast { message, .. } => self.toast = Some((message, ctx.input(|i| i.time))),
                 effectcraft_engine::Event::OpenUrl(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
+                effectcraft_engine::Event::RevealFile(path) => {
+                    if let Err(e) = reveal_file(&path) {
+                        self.ui.status = e;
+                    }
+                }
                 // Frames are keyed by content: an edit keeps those of comps it doesn't touch.
                 effectcraft_engine::Event::ProjectChanged { .. } => {}
                 effectcraft_engine::Event::Frontend { command, params } => {
@@ -1938,6 +1943,36 @@ impl eframe::App for EffectcraftApp {
 /// Advance playback with the viewer's scale (called by the viewer panel each frame).
 pub(crate) fn tick_playback(app: &mut EffectcraftApp, ctx: &egui::Context, scale: f64) {
     app.advance_playback(ctx, scale);
+}
+
+/// Show `path` in the system file manager (Reveal in Finder): File Explorer with the file selected
+/// on Windows, Finder with the file selected on macOS, the file's folder in the default file
+/// manager elsewhere.
+fn reveal_file(path: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    let mut cmd = {
+        use std::os::windows::process::CommandExt as _;
+        let mut cmd = std::process::Command::new("explorer.exe");
+        // Explorer parses `/select,"<file>"` itself: passed raw, as Rust's own quoting would break it.
+        cmd.raw_arg(format!("/select,\"{}\"", path.replace('/', "\\")));
+        cmd
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut cmd = std::process::Command::new("open");
+        cmd.arg("-R").arg(path);
+        cmd
+    };
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let mut cmd = {
+        let mut cmd = std::process::Command::new("xdg-open");
+        cmd.arg(std::path::Path::new(path).parent().unwrap_or_else(|| std::path::Path::new("/")));
+        cmd
+    };
+    let mut child = cmd.spawn().map_err(|e| format!("cannot reveal {path}: {e}"))?;
+    // Reaped off the UI thread. Explorer exits with status 1 even when it succeeds, so the status is not checked.
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 /// Put `width` × `height` straight-alpha RGBA8 pixels on the system clipboard (Composition ▸ Copy
