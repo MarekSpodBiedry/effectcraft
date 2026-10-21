@@ -317,6 +317,8 @@ pub struct EffectcraftApp {
     device_lost_close: Option<bool>,
     /// Answers of file dialogs shown without blocking ([`Hooks::file_dialog_async`]).
     pub(crate) dialog_answers: (Sender<DialogAnswer>, Receiver<DialogAnswer>),
+    /// Failures the file manager reports after "Reveal" launched it (shown in the status bar).
+    reveal_errors: (Sender<String>, Receiver<String>),
     /// Commands from the native menu bar.
     pub command_inbox: Option<Receiver<String>>,
     /// Pointer position in comp pixels (Info panel).
@@ -409,6 +411,7 @@ impl EffectcraftApp {
             gpu_failure_applied: None,
             device_lost_close: None,
             dialog_answers: std::sync::mpsc::channel(),
+            reveal_errors: std::sync::mpsc::channel(),
             command_inbox: None,
             pointer_comp: None,
             dialog_state: Default::default(),
@@ -1586,6 +1589,9 @@ impl EffectcraftApp {
     // ---------------------------------------------------------------- frame
 
     fn handle_events(&mut self, ctx: &egui::Context) {
+        while let Ok(e) = self.reveal_errors.1.try_recv() {
+            self.ui.status = e;
+        }
         for ev in self.session.drain_events() {
             match ev {
                 effectcraft_engine::Event::OpenComp(c) => {
@@ -1595,7 +1601,7 @@ impl EffectcraftApp {
                 effectcraft_engine::Event::Toast { message, .. } => self.toast = Some((message, ctx.input(|i| i.time))),
                 effectcraft_engine::Event::OpenUrl(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
                 effectcraft_engine::Event::RevealFile(path) => {
-                    if let Err(e) = reveal_file(&path) {
+                    if let Err(e) = reveal_file(ctx, &self.reveal_errors.0, &path) {
                         self.ui.status = e;
                     }
                 }
@@ -1947,8 +1953,9 @@ pub(crate) fn tick_playback(app: &mut EffectcraftApp, ctx: &egui::Context, scale
 
 /// Show `path` in the system file manager (Reveal in Finder): File Explorer with the file selected
 /// on Windows, Finder with the file selected on macOS, the file's folder in the default file
-/// manager elsewhere.
-fn reveal_file(path: &str) -> Result<(), String> {
+/// manager elsewhere. A file manager that starts but then exits with an error is reported through
+/// `errors` (the status bar).
+fn reveal_file(ctx: &egui::Context, errors: &Sender<String>, path: &str) -> Result<(), String> {
     #[cfg(windows)]
     let mut cmd = {
         use std::os::windows::process::CommandExt as _;
@@ -1960,7 +1967,12 @@ fn reveal_file(path: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut cmd = {
         let mut cmd = std::process::Command::new("open");
-        cmd.arg("-R").arg(path);
+        // `open -R` cannot select a file that is gone: open its folder so the footage can be relinked.
+        if std::path::Path::new(path).exists() {
+            cmd.arg("-R").arg(path);
+        } else {
+            cmd.arg(std::path::Path::new(path).parent().unwrap_or_else(|| std::path::Path::new("/")));
+        }
         cmd
     };
     #[cfg(not(any(windows, target_os = "macos")))]
@@ -1970,8 +1982,18 @@ fn reveal_file(path: &str) -> Result<(), String> {
         cmd
     };
     let mut child = cmd.spawn().map_err(|e| format!("cannot reveal {path}: {e}"))?;
-    // Reaped off the UI thread. Explorer exits with status 1 even when it succeeds, so the status is not checked.
-    std::thread::spawn(move || child.wait());
+    // Reaped off the UI thread. Explorer exits with status 1 even when it succeeds, so its status is not checked.
+    let (errors, ctx, path) = (errors.clone(), ctx.clone(), path.to_string());
+    std::thread::spawn(move || {
+        let failure = match child.wait() {
+            Ok(status) if cfg!(windows) || status.success() => return,
+            Ok(status) => format!("cannot reveal {path}: the file manager exited with {status}"),
+            Err(e) => format!("cannot reveal {path}: {e}"),
+        };
+        if errors.send(failure).is_ok() {
+            ctx.request_repaint();
+        }
+    });
     Ok(())
 }
 
