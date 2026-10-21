@@ -23,6 +23,9 @@ pub fn probe(path: impl AsRef<Path>) -> Result<Footage> {
         let turn = header.as_deref().map_or(Orientation::NoTransforms, video_turn);
         turn_footage(&mut f, turn);
         correct_rate(&mut f, header.as_deref().and_then(video_rate));
+        if f.kind == FootageKind::Video {
+            f.first_frame_time = header.as_deref().map_or(Tick::ZERO, video_first_frame_time);
+        }
         return Ok(f);
     }
     let bytes = std::fs::read(path).map_err(|e| MediaError::Io(format!("{}: {e}", path.display())))?;
