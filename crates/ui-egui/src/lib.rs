@@ -1265,7 +1265,7 @@ impl EffectcraftApp {
         if let Some(a) = &mut self.audio {
             // An edit while playing (mute, unmute, solo, levels): the sound follows it (#2104).
             if a.project().is_some_and(|p| !Arc::ptr_eq(&p, &self.session.project)) {
-                a.set_project(self.session.project.clone());
+                a.follow_project(self.session.project.clone());
             }
             a.pump();
             self.meter.update(a.feed.take_peaks(), now);

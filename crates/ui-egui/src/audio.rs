@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use effectcraft_engine::project::{ItemId, Project};
+use effectcraft_engine::project::{ItemId, ItemKind, LayerSource, Project};
 use effectcraft_engine::time::{FrameRate, Tick};
 
 use crate::frames::RenderSource;
@@ -285,6 +285,18 @@ impl AudioPlayback {
         s.cursor = clock_sample(&self.span, self.feed.consumed(), 0);
     }
 
+    /// Follow an edited `project`: mixing continues from it, and the queued sound is dropped only
+    /// when the edit changed what is heard ([`audio_changed`]); a transform or colour edit leaves
+    /// the queue alone, so playback does not drop out.
+    pub fn follow_project(&mut self, project: Arc<Project>) {
+        let Some(old) = self.project() else { return };
+        if audio_changed(&old, &project, self.comp) {
+            self.set_project(project);
+        } else if let Ok(mut s) = self.state.lock() {
+            s.src.project = project;
+        }
+    }
+
     /// The comp sample index audible now.
     pub fn clock(&self) -> i64 {
         clock_sample(&self.span, self.feed.consumed(), self.device.latency_frames())
@@ -307,6 +319,46 @@ impl Drop for AudioPlayback {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// Whether `new` sounds different from `old` for `comp`: a layer's timing, source, Audio / Solo /
+/// Effects switch, Audio Levels or effects, or the same for a nested comp. Other edits (video
+/// properties, names, labels) do not change the mix.
+fn audio_changed(old: &Project, new: &Project, comp: ItemId) -> bool {
+    fn comps_differ(old: &Project, new: &Project, comp: ItemId, depth: usize) -> bool {
+        let (Some(a), Some(b)) = (old.comp(comp), new.comp(comp)) else { return old.comp(comp).is_some() != new.comp(comp).is_some() };
+        if depth >= 16 {
+            return false;
+        }
+        a.layers.len() != b.layers.len()
+            || a.layers.iter().zip(&b.layers).any(|(x, y)| {
+                x.id != y.id
+                    || x.source != y.source
+                    || x.start_time != y.start_time
+                    || x.in_point != y.in_point
+                    || x.out_point != y.out_point
+                    || x.stretch != y.stretch
+                    || x.switches.audio != y.switches.audio
+                    || x.switches.solo != y.switches.solo
+                    || x.switches.effects != y.switches.effects
+                    || x.props.sub("audio") != y.props.sub("audio")
+                    || x.effects() != y.effects()
+                    || match &x.source {
+                        LayerSource::Footage { item } => footage_differs(old, new, *item),
+                        LayerSource::Comp { item } => comps_differ(old, new, *item, depth + 1),
+                        _ => false,
+                    }
+            })
+    }
+    /// The footage item's audio availability changed (relinked, missing, no audio).
+    fn footage_differs(old: &Project, new: &Project, item: ItemId) -> bool {
+        let f = |p: &Project| match p.item(item).map(|i| &i.kind) {
+            Some(ItemKind::Footage(f)) => Some((f.has_audio, f.missing, f.path.clone())),
+            _ => None,
+        };
+        f(old) != f(new)
+    }
+    comps_differ(old, new, comp, 0)
 }
 
 /// Mix one block at the feeder's cursor into the feed and move the cursor on (wrapping or
@@ -673,6 +725,42 @@ mod tests {
         playback.feed.pull(&mut out);
         assert!(out.iter().all(|v| *v == 0.0), "the muted layer still plays");
         playback.stop();
+    }
+
+    /// #2104: only edits that change the mix drop the queued sound.
+    #[test]
+    fn only_audible_edits_change_the_audio() {
+        use effectcraft_engine::color::Label;
+        use effectcraft_engine::project::{Comp, Footage, FootageKind, build};
+
+        let mut p = Project::default();
+        let footage =
+            Footage { path: "tone.flac".into(), kind: FootageKind::Audio, duration: Tick::from_seconds_f64(60.0), has_audio: true, ..Default::default() };
+        let item = p.add_item("tone.flac", Label::SeaFoam, None, ItemKind::Footage(footage));
+        let mut comp = Comp::new(64, 36, FrameRate::new(30, 1), Tick::from_seconds_f64(10.0));
+        let layer = build::layer(&mut p, &comp, "tone.flac", LayerSource::Footage { item }, (0, 0), None);
+        comp.layers = vec![layer];
+        let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+        let old = p;
+        // A video-only edit: the layer is hidden, its name and label change.
+        let mut video = old.clone();
+        if let Some(l) = video.comp_mut(cid).and_then(|c| c.layers.first_mut()) {
+            l.switches.video = false;
+            l.name = "renamed".into();
+        }
+        assert!(!audio_changed(&old, &video, cid), "a video edit must not drop the sound");
+        // Muting, solo and a moved in point do change it.
+        for edit in 0..3 {
+            let mut edited = old.clone();
+            if let Some(l) = edited.comp_mut(cid).and_then(|c| c.layers.first_mut()) {
+                match edit {
+                    0 => l.switches.audio = false,
+                    1 => l.switches.solo = true,
+                    _ => l.in_point = Tick::from_seconds_f64(1.0),
+                }
+            }
+            assert!(audio_changed(&old, &edited, cid), "audible edit {edit} must be followed");
+        }
     }
 
     #[test]
